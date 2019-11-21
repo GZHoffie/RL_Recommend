@@ -1,109 +1,158 @@
 # -*- coding: utf-8 -*-
 import random
-from collections import deque
 import gym
 import numpy as np
-from keras.layers import Dense, LSTM, Input, Add, Embedding
+from keras.layers import Dense, LSTM, Input, Embedding
 from keras.models import Model
+from recogym import Configuration, env_1_args
+from recogym.agents import Agent
 
 EPISODES = 1000
 
 
-class DQNAgent:
-    def __init__(self, _state_size, _action_size, input_dim, output_dim):
-        self.state_size = _state_size
-        self.action_size = _action_size
-        self.memory = deque(maxlen=2000)
+class DQNAgent(Agent):
+    def __init__(self, config):
+        super(DQNAgent, self).__init__(config)
+
+        self.input_dim = self.config.num_products
+        self.action_size = self.config.num_products
+        self.memory = []
         self.gamma = 0.95  # discount rate
         self.epsilon = 1.0  # exploration rate
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
         self.learning_rate = 0.001
         self.model = self._build_model()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
         self.session = [1, 0]  # first stands for Organic, second stands for Session
 
+        self.action0 = np.zeros((self.action_size + 2))
+
     def _build_model(self):
+        # Build embedding layers
+        input1 = Input(batch_shape=(None, None, self.input_dim + 2))  # sample size, timestamps, dim
+        embedded_layer = Embedding(input_dim=self.input_dim+2, output_dim=25)(input1)
 
-        # Build embedding layers
-        input1 = Input(batch_shape=(None, None, self.input_dim))  # sample size, timestamps, dim
-        embedded_layer = Embedding(output_dim=25)(input1)
+        # Build LSTM. Two layers        
+        Bandit_lstm_layer1 = LSTM(25, return_sequences=True)(embedded_layer)
+        Bandit_lstm_layer2 = LSTM(10)(Bandit_lstm_layer1)
+        temp_layer = Bandit_lstm_layer1
 
-        # Build Organic LSTM. Two layers
-        Organic_lstm_layer1, self.organic_hidden1, self.organic_cell1 = LSTM(25, stateful=True, return_state=True,
-                                                                             return_sequences=True)(embedded_layer)
-        Organic_lstm_layer2, self.organic_hidden2, self.organic_cell2 = LSTM(self.output_dim, stateful=True,
-                                                                             return_sequences=True,
-                                                                             return_state=True)(Organic_lstm_layer1)
-
-        # Build Bandit LSTM. Two layers
-        Bandit_lstm_layer1, self.bandit_hidden1, self.bandit_cell1 = LSTM(25, stateful=True, return_sequences=True,
-                                                                          return_state=True)(embedded_layer)
-        Bandit_lstm_layer2, self.bandit_hidden2, self.bandit_cell2 = LSTM(self.output_dim, stateful=True,
-                                                                          return_sequences=True,
-                                                                          return_state=True)(Bandit_lstm_layer1)
-        Total_layer = Add()([Bandit_lstm_layer2 * self.session[1], Organic_lstm_layer2 * self.session[0]])
-
-        # Neural Net for Deep-Q learning Model
-        DQN_layer1 = Dense(24, activation='relu')(Total_layer)
+        #  Neural Net for Deep-Q learning Model
+        DQN_layer1 = Dense(24, activation='relu')(Bandit_lstm_layer2)
         DQN_layer2 = Dense(24, activation='relu')(DQN_layer1)
         DQN_layer3 = Dense(self.action_size, activation='linear')(DQN_layer2)
         model = Model(input1, DQN_layer3)
         model.compile(optimizer='adam', loss='mse')
         return model
 
-    def Organic_2_Bandit(self):
-        self.model.layers[1].state[0] = self.organic_hidden1
-        self.model.layers[1].state[1] = self.organic_cell1
-        self.model.layers[2].state[0] = self.organic_hidden2
-        self.model.layers[2].state[1] = self.organic_cell2
 
-    def Bandit_2_Organic(self):
-        self.model.layers[1].state[0] = self.bandit_hidden1
-        self.model.layers[1].state[1] = self.bandit_cell1
-        self.model.layers[2].state[0] = self.bandit_hidden2
-        self.model.layers[2].state[1] = self.bandit_cell2
+def remember(self, state, _action, _reward, next_state, _done):
+    self.memory.append((state, _action, _reward, next_state, _done))
 
-    def remember(self, _state, _action, _reward, _next_state, _done):
-        self.memory.append((_state, _action, _reward, _next_state, _done))
 
-    def act(self, _state):
-        if np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_size)
-        act_values = self.model.predict(_state)
-        return np.argmax(act_values[0])  # returns action
+def memory_reset(self):
+    self.memory = []
 
-    def replay(self, _batch_size):  # remove state and next state
-        minibatch = random.sample(self.memory, _batch_size)
-        for state, action, reward, next_state, done in minibatch:
-            target = reward
-            if not done:
-                target = (reward + self.gamma *
-                          np.amax(self.model.predict(next_state)[0]))
-            target_f = self.model.predict(state)
-            target_f[0][action] = target
-            self.model.fit(state, target_f, epochs=1, verbose=0)
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
 
-    def load(self, name):
-        self.model.load_weights(name)
+def act(self, _a, _mode, _r):
+    if np.random.rand() <= self.epsilon:
+        _a = random.randrange(self.action_size)
+    _action = self.action0
+    _action[_a] = 1
+    _action[-1] = _r
+    _action[-2] = _mode
+    q_values = self.model.predict(_action)
+    return np.argmax(q_values[0]), q_values  # returns action
 
-    def save(self, name):
-        self.model.save_weights(name)
+
+def load(self, name):
+    self.model.load_weights(name)
+
+
+def save(self, name):
+    self.model.save_weights(name)
+
+
+def replay(self, _action, _q_list, _mode, _reward):
+    n = len(_action)
+    q_target = []
+    # q_target = [q_list[i] if mode[i] == 0 else (reward[i] + self.gamma * q_list[i + 1]) for i in range(n - 1)]
+    for i in range(n - 1):
+        if _mode[i] == 0:
+            q_target.append(_q_list[i])
+        else:
+            _q_list[i, _action[i]] = _reward[i] + self.gamma * max(_q_list[i + 1])
+            q_target.append(_q_list[i])
+
+    action_r = np.zeros((n - 1, self.action_size))
+    for i in range(n - 1):
+        action_r[i, _action[i]] = 1
+
+    input_r = np.concatenate(action_r[:-1, :], _mode[:-1], _reward[:-1])
+    self.model.fit(input_r, q_target, batch_size=n - 1)
 
 
 if __name__ == "__main__":
-    env = gym.make('CartPole-v1')
-    state_size = env.observation_space.shape[0]
-    action_size = env.action_space.n
-    agent = DQNAgent(state_size, action_size)
-    # agent.load("./save/cartpole-dqn.h5")
-    done = False
-    batch_size = 32
+    # You can overwrite environment arguments here:
+    env_1_args['random_seed'] = 42
 
-    for e in range(EPISODES):
+    # Initialize the gym for the first time by calling .make() and .init_gym()
+    env = gym.make('reco-gym-v1')
+    env.init_gym(env_1_args)
+    env.reset_random_seed()
+
+    # Change product number here
+    num_products = 500
+    agent = DQNAgent(Configuration({
+        **env_1_args,
+        'num_products': num_products,
+    }))
+    env.reset()
+    num_offline_users = 100000
+    num_clicks = 0
+    num_events = 0
+
+    for _ in range(num_offline_users):
+        # Reset env and set done to False.
+        env.reset()
+
+        observation, _, done, _ = env.step(None)
+        reward = None
+        done = None
+        q_list = []
+        action = []
+        mode = []
+        reward = []
+        a = 0
+        q = []
+        while not done:
+            if observation:
+                for item in observation.sessions():
+                    action.append(item['v'])
+                    reward.append(0)
+                    mode.append(0)
+                    a, q = agent.act(item['v'], 0, 0)
+                    q_list.append(q)
+
+            mode.append(1)
+            action.append(a)
+            observation, r, done, info = env.step(a)
+            reward.append(r)
+            a, q = agent.act(a, 1, r)
+            q_list.append(q)
+
+            num_clicks += 1 if reward == 1 and reward is not None else 0
+            num_events += 1
+        agent.replay(action, q_list, mode, reward)
+
+        print(num_clicks, num_events)
+
+    # env = gym.make('CartPole-v1')
+    # state_size = env.observation_space.shape[0]
+    # action_size = env.action_space.n
+    # agent.load("./save/cartpole-dqn.h5")
+
+    '''for e in range(EPISODES):
         state = env.reset()
         state = np.reshape(state, [1, state_size])
         for time in range(500):
@@ -119,6 +168,6 @@ if __name__ == "__main__":
                       .format(e, EPISODES, time, agent.epsilon))
                 break
             if len(agent.memory) > batch_size:
-                agent.replay(batch_size)
-        # if e % 10 == 0:
-        #     agent.save("./save/cartpole-dqn.h5")
+                agent.replay(batch_size)'''
+    # if e % 10 == 0:
+    #     agent.save("./save/cartpole-dqn.h5")
